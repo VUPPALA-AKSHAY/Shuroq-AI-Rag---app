@@ -1,0 +1,17 @@
+node_modules
+dist
+.cache
+**/.cache/
+uploads/
+.DS_Store
+run-logs
+logs
+*.log
+__pycache__
+*.py[cod]
+.venv
+venv
+
+**/.env
+**/.env.*
+!**/.env.example
