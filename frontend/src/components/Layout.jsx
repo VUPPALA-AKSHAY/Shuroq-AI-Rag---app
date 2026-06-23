@@ -84,8 +84,8 @@ const Layout = ({ children }) => {
             </div>
             {sidebarOpen && (
               <div className="min-w-0">
-                <span className="block truncate text-[18px] font-extrabold tracking-[-0.01em] text-[#f4f4f5]">Shuroq AI</span>
-                <p className="mt-1 truncate text-[10px] font-bold uppercase tracking-widest text-[#8f8f98]">AI Intelligence Platform</p>
+                <span className="block truncate text-[18px] font-extrabold tracking-[-0.01em] text-[#f4f4f5]">AI Ready School</span>
+                <p className="mt-1 truncate text-[10px] font-bold uppercase tracking-widest text-[#8f8f98]">AI Study Partner</p>
               </div>
             )}
             {sidebarOpen && <div className="flex-1" />}

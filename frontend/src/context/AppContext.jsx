@@ -17,7 +17,7 @@ function normalizeWelcomeMessage(text = '') {
   return LEGACY_WELCOME_MESSAGES.has(value) ? WELCOME_MESSAGE : text;
 }
 
-const DEMO_USER = { email: 'akshay@shuroq.ai', name: 'Principal Analyst' };
+const DEMO_USER = { email: 'akshay@shuroq.ai', name: 'Student' };
 const DEMO_PROJECTS = [
   {
     id: 'demo-workspace',
@@ -74,7 +74,7 @@ const DEMO_MESSAGES = {
     {
       id: 'demo-msg-1',
       role: 'assistant',
-      sender: 'Shuroq AI',
+      sender: 'AI Ready School',
       version: 'v4.2.0',
       text: WELCOME_MESSAGE,
       time: '09:41 AM',
@@ -277,13 +277,21 @@ function isGenericChatTitle(title = '') {
 
 function mapMessageToUi(message, userName) {
   const isAssistant = message.role === 'assistant';
+  let text = message.content || '';
+  let images = [];
+  if (text.includes('\n\n[IMAGES]\n')) {
+    const parts = text.split('\n\n[IMAGES]\n');
+    text = parts[0];
+    images = parts[1].split('\n').filter(Boolean);
+  }
   return {
     id: message.id,
     role: message.role,
-    sender: isAssistant ? 'Shuroq AI' : userName || 'User',
+    sender: isAssistant ? 'AI Ready School' : userName || 'Student',
     version: isAssistant ? 'v4.2.0' : undefined,
-    text: normalizeWelcomeMessage(message.content),
+    text: normalizeWelcomeMessage(text),
     sources: message.sources || [],
+    images: images,
     time: new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
   };
 }
@@ -311,6 +319,7 @@ export const AppProvider = ({ children }) => {
   const [messagesByChat, setMessagesByChat] = useState(HAS_BACKEND_API ? {} : DEMO_MESSAGES);
   const [isBootstrapping, setIsBootstrapping] = useState(HAS_BACKEND_API);
   const [isLoadingWorkspace, setIsLoadingWorkspace] = useState(false);
+  const [loadedWorkspaces, setLoadedWorkspaces] = useState(() => new Set());
 
   const [selectedEngine, setSelectedEngineState] = useState(() => localStorage.getItem('chatbDefaultModel') || 'glm-5');
   const [responseMode, setResponseModeState] = useState(() => localStorage.getItem('chatbResponseMode') || 'rag');
@@ -418,6 +427,12 @@ export const AppProvider = ({ children }) => {
         return curr;
       });
 
+      setLoadedWorkspaces((prev) => {
+        const next = new Set(prev);
+        next.add(workspaceId);
+        return next;
+      });
+
       return {
         fileCount: fileList.length,
         chatsCount: mappedChats.length
@@ -479,10 +494,29 @@ export const AppProvider = ({ children }) => {
       const rows = workspaces.filter(Boolean);
 
       const countsByWorkspace = new Map();
-      for (const workspace of rows) {
-        const info = await ensureWorkspaceData(workspace.id);
-        countsByWorkspace.set(workspace.id, info?.fileCount || 0);
-      }
+      await Promise.all(
+        rows.map(async (workspace) => {
+          try {
+            const [filesRes, chatsRes] = await Promise.all([
+              api.get(`/workspaces/${workspace.id}/files`),
+              api.get(`/workspaces/${workspace.id}/chats`),
+            ]);
+
+            const fileList = (filesRes.data?.data || []).map(mapFileToDataset);
+            const rawChats = chatsRes.data?.data || [];
+
+            setDatasetsByProject((prev) => ({ ...prev, [workspace.id]: fileList }));
+
+            const mappedChats = rawChats.map((chat) => mapChatToUi(chat, null));
+            setChatsByProject((prev) => ({ ...prev, [workspace.id]: mappedChats }));
+
+            countsByWorkspace.set(workspace.id, fileList.length);
+          } catch (err) {
+            console.error(`Failed to pre-fetch metadata for workspace ${workspace.id}:`, err);
+            countsByWorkspace.set(workspace.id, 0);
+          }
+        })
+      );
 
       const mappedProjects = rows.map((workspace) => {
         const fileCount = countsByWorkspace.get(workspace.id) || 0;
@@ -511,13 +545,13 @@ export const AppProvider = ({ children }) => {
 
   useEffect(() => {
     if (!HAS_BACKEND_API || !user || !activeProjectId) return;
-    if (datasetsByProject[activeProjectId] && chatsByProject[activeProjectId]) return;
+    if (loadedWorkspaces.has(activeProjectId)) return;
 
     ensureWorkspaceData(activeProjectId).catch((error) => {
       console.error('Failed to load workspace data:', error?.response?.data || error.message);
     });
 
-  }, [activeProjectId, user?.email]);
+  }, [activeProjectId, user?.email, loadedWorkspaces]);
 
   const addProject = async (title, description) => {
     if (!HAS_BACKEND_API) {
@@ -656,7 +690,7 @@ export const AppProvider = ({ children }) => {
           {
             id: `m${Date.now()}`,
             role: 'assistant',
-            sender: 'Shuroq AI',
+            sender: 'AI Ready School',
             version: 'v4.2.0',
             text: WELCOME_MESSAGE,
             time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -887,9 +921,14 @@ export const AppProvider = ({ children }) => {
 
     if (!HAS_BACKEND_API) return;
 
+    let contentToSend = msg.text;
+    if (msg.images && msg.images.length > 0) {
+      contentToSend += '\n\n[IMAGES]\n' + msg.images.join('\n');
+    }
+
     api.post(`/chats/${chatId}/messages`, {
       role: msg.role === 'assistant' ? 'assistant' : 'user',
-      content: normalizeWelcomeMessage(msg.text),
+      content: normalizeWelcomeMessage(contentToSend),
       sources: msg.sources || []
     }).catch((error) => {
       console.error('Message sync failed:', error?.response?.data || error.message);

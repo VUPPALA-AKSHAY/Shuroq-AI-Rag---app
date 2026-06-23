@@ -232,7 +232,7 @@ const MessageText = ({ text, role, datasets, onPreviewFile }) => {
               <span className="flex h-7 w-7 items-center justify-center rounded-md bg-white/[0.08] text-[11px] font-bold text-primary">
                 {numbered[1]}
               </span>
-              <div className="min-w-0 pt-0.5 text-[14px] font-medium leading-6 text-on-surface/90">
+              <div className="min-w-0 pt-0.5 text-[14px] font-medium leading-6 text-on-surface/90 break-words whitespace-pre-wrap">
                 {renderLineParts(numbered[2], lineIndex)}
               </div>
             </div>
@@ -240,7 +240,7 @@ const MessageText = ({ text, role, datasets, onPreviewFile }) => {
         }
 
         return (
-          <div key={`line-${lineIndex}`} className="flex min-h-[1.5em] flex-wrap items-baseline text-[14px] leading-6">
+          <div key={`line-${lineIndex}`} className="min-h-[1.5em] text-[14px] leading-6 break-words whitespace-pre-wrap">
             {renderLineParts(line, lineIndex)}
           </div>
         );
@@ -320,11 +320,38 @@ const Chat = () => {
     responseMode,
     setResponseMode,
     temperature,
+    user,
   } = useApp();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
 
   const [inputVal, setInputVal] = useState('');
+  const [webSearchEnabled, setWebSearchEnabled] = useState(false);
+  const [attachedImages, setAttachedImages] = useState([]);
+  const fileInputRef = useRef(null);
+
+  const handleImageUpload = (e) => {
+    const files = Array.from(e.target.files || []);
+    files.forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        setAttachedImages((prev) => [
+          ...prev,
+          {
+            id: Date.now().toString() + '-' + Math.random().toString(36).substring(2, 6),
+            name: file.name,
+            dataUrl: event.target.result
+          }
+        ]);
+      };
+      reader.readAsDataURL(file);
+    });
+    e.target.value = '';
+  };
+
+  const removeAttachedImage = (id) => {
+    setAttachedImages((prev) => prev.filter((img) => img.id !== id));
+  };
 
   const [isRetrieving, setIsRetrieving] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -875,7 +902,7 @@ const Chat = () => {
         addMessageToChat(targetChatId, {
           id: (Date.now() + 1).toString(),
           role: 'assistant',
-          sender: 'Shuroq AI',
+          sender: 'AI Ready School',
           version: modelName || selectedEngine,
           text: responseText,
           reasoning: reasoningPath,
@@ -903,16 +930,20 @@ const Chat = () => {
     if (!projectId || !chatId) return;
     setChatTitleById(chatId, datasetBasedTitle, { onlyIfGeneric: true });
 
+    const imagePayload = attachedImages.map((img) => img.dataUrl);
+
     const userMsg = {
       id: Date.now().toString(),
       role: 'user',
-      sender: 'Principal Analyst',
+      sender: user?.name || 'Student',
       text: question,
+      images: imagePayload,
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     };
 
     addMessageToChat(chatId, userMsg);
     setInputVal('');
+    setAttachedImages([]);
     setIsRetrieving(true);
 
     const useDirectContext = responseModeRef.current === 'direct';
@@ -925,9 +956,11 @@ const Chat = () => {
         fileId: activeDocument.id,
         fileName: activeDocument.name,
         directContext: useDirectContext,
+        webSearch: webSearchEnabled,
         topK: 10,
         model: selectedEngine,
         temperature,
+        images: imagePayload,
       });
 
       const payload = response.data?.data || {};
@@ -988,7 +1021,7 @@ const Chat = () => {
     const userMsg = {
       id: Date.now().toString(),
       role: 'user',
-      sender: 'Principal Analyst',
+      sender: user?.name || 'Student',
       text: `Added new transaction entry to ${activePreviewName}: Segment = ${txSegment}, Volatility = ${vol}, Delta = $${delta.toLocaleString()}`,
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     };
@@ -1155,6 +1188,29 @@ const Chat = () => {
                       onPreviewFile={setActivePreviewName}
                     />
 
+                    {msg.images && msg.images.length > 0 && (
+                      <div className="flex flex-wrap gap-2.5 mt-3">
+                        {msg.images.map((imgUrl, idx) => (
+                          <div
+                            key={idx}
+                            className="relative rounded-lg overflow-hidden border border-white/10 max-w-[240px] max-h-[180px] shadow-sm hover:scale-[1.02] transition-transform duration-200 cursor-pointer"
+                            onClick={() => {
+                              const win = window.open();
+                              if (win) {
+                                win.document.write(`<img src="${imgUrl}" style="max-width:100%; max-height:100%; display:block; margin:auto;" />`);
+                              }
+                            }}
+                          >
+                            <img
+                              src={imgUrl}
+                              alt={`Attachment ${idx + 1}`}
+                              className="object-contain max-w-full max-h-[180px] rounded-lg"
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
                     {msg.chart && (
                       <div className="h-64 w-full rounded border border-outline-variant/30 bg-surface overflow-hidden relative group/chart mt-6">
                         <img
@@ -1184,6 +1240,51 @@ const Chat = () => {
                         ))}
                       </div>
                     )}
+                    {(() => {
+                      if (!msg.sources || msg.sources.length === 0) return null;
+                      
+                      const webSources = msg.sources.filter(src => src.includes('http://') || src.includes('https://'));
+                      
+                      if (webSources.length === 0) return null;
+                      
+                      return (
+                        <div className="flex flex-wrap gap-2 mt-4 pt-3 border-t border-white/5 animate-fade-in">
+                          <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/40 font-bold block w-full mb-1">Sources & References</span>
+                          {webSources.map((src, idx) => {
+                            const urlMatch = src.match(/(https?:\/\/[^\s)]+)/);
+                            const url = urlMatch?.[1];
+                            let label = url ? src.replace(url, '').replace(/[()]/g, '').trim() || url : src;
+                            
+                            label = label.replace(/Tavily Search/g, 'Search').replace(/Tavily/g, '').trim();
+
+                            if (url) {
+                              return (
+                                <a
+                                  key={idx}
+                                  href={url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1.5 px-3 py-1 rounded bg-white/[0.04] border border-white/5 text-[11px] font-medium text-primary hover:bg-primary/10 transition-colors"
+                                >
+                                  <span className="material-symbols-outlined text-[13px]">open_in_new</span>
+                                  {label}
+                                </a>
+                              );
+                            }
+
+                            return (
+                              <span
+                                key={idx}
+                                className="inline-flex items-center gap-1.5 px-3 py-1 rounded bg-white/[0.04] border border-white/5 text-[11px] font-medium text-on-surface-variant/70"
+                              >
+                                <span className="material-symbols-outlined text-[13px]">description</span>
+                                {label}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
               </motion.div>
@@ -1196,7 +1297,7 @@ const Chat = () => {
                 </div>
                 <div className="flex-grow space-y-3">
                   <div className="flex items-center gap-3">
-                    <span className="text-xs text-primary font-bold">Shuroq AI</span>
+                    <span className="text-xs text-primary font-bold">AI Ready School</span>
                     <span className="text-[9px] text-on-surface-variant/40 bg-white/5 px-2 py-0.5 rounded border border-white/10">Searching Database...</span>
                   </div>
                   <div className="p-4 sm:p-6 rounded-2xl border border-outline-variant/30 bg-surface-container-low space-y-4">
@@ -1217,7 +1318,7 @@ const Chat = () => {
                 </div>
                 <div className="flex-grow space-y-2">
                   <div className="flex items-center gap-3">
-                    <span className="font-label-md text-xs text-primary font-bold">Shuroq AI</span>
+                    <span className="font-label-md text-xs text-primary font-bold">AI Ready School</span>
                     <span className="text-[10px] text-on-surface-variant/40 animate-pulse">Typing...</span>
                   </div>
                   <div className="chat-message-bubble chat-message-bubble-assistant rounded-xl p-5 bg-[#1b1b1d]/95 border border-white/[0.08] text-on-surface leading-relaxed font-body-md text-sm text-left shadow-[0_18px_50px_rgba(0,0,0,0.24)] space-y-4">
@@ -1242,22 +1343,64 @@ const Chat = () => {
         <div className="chat-composer-wrap absolute bottom-0 left-0 right-0 px-4 pb-4 pt-4 sm:px-6 sm:pb-6 lg:px-12 lg:pb-10 bg-gradient-to-t from-surface-container-lowest via-surface-container-lowest/95 to-transparent z-10">
           <form onSubmit={handleSend} className="chat-composer max-w-4xl mx-auto glass-panel border-white/10 rounded-2xl p-2 flex items-end gap-2 sm:p-2.5 sm:gap-3 focus-within:border-primary/30 transition-all shadow-2xl">
             <div className="flex flex-col flex-1">
+              {attachedImages.length > 0 && (
+                <div className="flex flex-wrap gap-2 px-3 pt-2 pb-1 border-b border-white/5 mb-2">
+                  {attachedImages.map((img) => (
+                    <div key={img.id} className="relative w-16 h-16 rounded overflow-hidden border border-white/10 group">
+                      <img src={img.dataUrl} alt={img.name} className="w-full h-full object-cover" />
+                      <button
+                        type="button"
+                        onClick={() => removeAttachedImage(img.id)}
+                        className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center text-white transition-opacity cursor-pointer border-none outline-none"
+                        title="Remove image"
+                      >
+                        <span className="material-symbols-outlined text-[16px]">close</span>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
               <textarea
                 value={inputVal}
                 onChange={(e) => setInputVal(e.target.value)}
                 onKeyDown={handleKeyDown}
                 className="w-full bg-transparent border-none focus:ring-0 text-on-surface font-body-md text-sm p-3 resize-none min-h-[56px] max-h-48 custom-scrollbar focus:outline-none placeholder:text-on-surface-variant/30 text-sm"
-                placeholder={isRetrieving || isStreaming ? "Shuroq AI is computing responses..." : "Command Shuroq AI to analyze, parse, or run simulations..."}
+                placeholder={isRetrieving || isStreaming ? "AI Ready School is computing responses..." : "Ask AI Ready School a math, data, or study question (upload images if needed)..."}
                 rows={1}
                 disabled={isRetrieving || isStreaming}
               />
-              <div className="flex flex-wrap items-center justify-end gap-3 sm:gap-4 px-3 pb-2">
-                {activeDocument && (
-                  <span className="max-w-[150px] sm:max-w-[240px] truncate text-[9px] font-bold text-primary/70" title={activeDocument.name}>
-                    DOC: {activeDocument.name}
-                  </span>
-                )}
-                <span className="hidden sm:inline text-[9px] font-bold text-on-surface-variant/30 tracking-wider">ENTER TO SEND</span>
+              <div className="flex flex-wrap items-center justify-between gap-3 sm:gap-4 px-3 pb-2">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="inline-flex items-center justify-center p-1.5 rounded-full text-on-surface-variant/50 hover:bg-white/5 hover:text-primary transition-all cursor-pointer border border-transparent"
+                    title="Attach image"
+                  >
+                    <span className="material-symbols-outlined text-[18px]">add_photo_alternate</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setWebSearchEnabled((prev) => !prev)}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-bold transition-all border cursor-pointer hover:scale-105 active:scale-95 ${
+                      webSearchEnabled
+                        ? 'bg-primary/20 text-primary border-primary/50 shadow-sm'
+                        : 'bg-transparent text-on-surface-variant/50 border-white/10 hover:border-white/20 hover:text-on-surface-variant/70'
+                    }`}
+                    title="Toggle Web Search"
+                  >
+                    <span className="material-symbols-outlined text-[13px] font-bold">language</span>
+                    Web Search
+                  </button>
+                </div>
+                <div className="flex items-center gap-3">
+                  {activeDocument && (
+                    <span className="max-w-[150px] sm:max-w-[240px] truncate text-[9px] font-bold text-primary/70" title={activeDocument.name}>
+                      DOC: {activeDocument.name}
+                    </span>
+                  )}
+                  <span className="hidden sm:inline text-[9px] font-bold text-on-surface-variant/30 tracking-wider">ENTER TO SEND</span>
+                </div>
               </div>
             </div>
             <button
@@ -1268,6 +1411,14 @@ const Chat = () => {
               <span className="material-symbols-outlined font-bold">send</span>
             </button>
           </form>
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleImageUpload}
+            accept="image/*"
+            multiple
+            className="hidden"
+          />
         </div>
 
       </section>

@@ -117,10 +117,10 @@ const Login = ({ onLogin }) => {
   const titleText = (
     <span className="flex flex-col gap-2">
       <span className="font-display font-extrabold text-primary tracking-tight">
-        {isCreateMode ? "Create Account" : "Shuroq AI"}
+        {isCreateMode ? "Create Account" : "AI Ready School"}
       </span>
       <span className="font-light text-on-surface-variant text-sm uppercase tracking-wider">
-        {isCreateMode ? "Join the platform" : "AI Intelligence Platform"}
+        {isCreateMode ? "Join the platform" : "AI Study Partner"}
       </span>
     </span>
   );

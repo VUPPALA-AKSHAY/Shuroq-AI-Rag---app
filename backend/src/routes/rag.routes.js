@@ -21,9 +21,11 @@ const querySchema = z.object({
   fileId: z.string().min(1).optional(),
   fileName: z.string().min(1).optional(),
   directContext: z.coerce.boolean().optional(),
+  webSearch: z.coerce.boolean().optional(),
   topK: z.coerce.number().optional(),
   model: z.string().min(1).optional(),
-  temperature: z.coerce.number().optional()
+  temperature: z.coerce.number().optional(),
+  images: z.array(z.string()).optional()
 });
 
 function isGeminiModel(model) {
@@ -164,12 +166,14 @@ router.post("/query", async (req, res, next) => {
         file_id: body.fileId,
         file_name: body.fileName,
         direct_context: directContext,
+        web_search: Boolean(body.webSearch),
         top_k: body.topK || 10,
         context: context,
         model,
         temperature: body.temperature ?? 0.2,
         gemini_api_key: geminiKey,
-        cerebras_api_key: cerebrasKey
+        cerebras_api_key: cerebrasKey,
+        images: body.images
       },
       {
         timeout: 60000

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import json
 import math
 import os
@@ -1106,12 +1107,14 @@ class QueryRequest(BaseModel):
     top_k: int = Field(default=15, ge=1, le=50)
     context: str | None = None
     direct_context: bool = False
+    web_search: bool = False
     file_id: str | None = None
     file_name: str | None = None
     model: str | None = None
     temperature: float = Field(default=0.2, ge=0, le=2)
     gemini_api_key: str | None = None
     cerebras_api_key: str | None = None
+    images: list[str] | None = None
 
 class RetrievalDiagnostics(BaseModel):
     mode: str
@@ -1160,6 +1163,8 @@ def _build_prompt(
     sources: list[SourceRef],
     hits: list[RetrievalHit] | None = None,
     evidence_focus: str = "head",
+    web_search_context: str | None = None,
+    has_images: bool = False,
 ) -> str:
     if hits:
         source_context = "\n\n".join(
@@ -1177,21 +1182,37 @@ def _build_prompt(
         )
     source_context = _truncate_source_context(source_context, SOURCE_CONTEXT_CHARS, evidence_focus)
     supplied_context = _truncate_text(supplied_context or "", SUPPLIED_CONTEXT_CHARS)
+    
     context_parts = [
         "Retrieved document evidence:\n" + source_context if source_context else "",
+        "Web search results evidence:\n" + web_search_context if web_search_context else "",
         "Workspace file metadata:\n" + supplied_context if supplied_context else "",
     ]
     context = "\n\n".join(part for part in context_parts if part).strip()
 
     if not context:
-        context = "No workspace files or indexed chunks were available for this request."
+        context = "No workspace files, indexed chunks, or search results were available for this request."
+
+    if has_images:
+        instructions = (
+            "Answer the user's question using the provided images, retrieved document evidence, and web search results below. "
+            "Prioritize analyzing and explaining the images. You should use your general pre-trained vision capabilities "
+            "and world knowledge to identify, describe, and answer questions about the images."
+        )
+        rule_1 = (
+            "1. Ground your answers using the provided images and data. You CAN and SHOULD use your general knowledge and vision "
+            "to analyze and explain the images. Do not restrict image analysis to the document context if the document is unrelated."
+        )
+    else:
+        instructions = "Answer the user's question using ONLY the retrieved document evidence and web search results below."
+        rule_1 = "1. Use ONLY the data provided below (document evidence and web search results). Do NOT use outside knowledge or make assumptions."
 
     return f"""
-You are Shuroq AI inside CHATB, a workspace data analysis app.
-Answer the user's question using ONLY the retrieved document evidence below.
+You are AI Ready School, your multimodal AI Study Partner and Math/Data Tutor powered by igebra.ai.
+{instructions}
 
 CRITICAL RULES:
-1. Use ONLY the data provided below. Do NOT use outside knowledge.
+{rule_1}
 2. For listing, counting, or filtering questions, scan ALL evidence chunks exhaustively.
    List EVERY matching entry from the data. Do NOT stop after finding a few matches.
 3. Present only the final consolidated list or answer. Do not output your step-by-step chunk-by-chunk scanning log in the final response.
@@ -1201,6 +1222,7 @@ CRITICAL RULES:
 7. If the user asks multiple questions in a single prompt, you MUST address and answer ALL of them clearly and completely.
 8. Evidence chunks are labeled in original document order. For first/last/final/beginning/end/before/after questions, answer from that document order, not from semantic relevance.
 9. If asked for the last question, item, section, row, record, page, or line, identify the final matching entry that appears in the ordered evidence.
+10. If the user uploads an image, prioritize describing and answering questions about the image. If the retrieved document chunks or web search results are unrelated to the image, focus on the image analysis and ignore the unrelated document text completely. Do NOT mention the unrelated document text, do NOT state that the documents are unrelated, and do NOT reference the document evidence at all in your response.
 
 {context}
 
@@ -1208,12 +1230,25 @@ User question:
 {question}
 """.strip()
 
-def _build_direct_document_prompt(question: str, supplied_context: str | None) -> str:
+def _build_direct_document_prompt(question: str, supplied_context: str | None, has_images: bool = False) -> str:
     selected_document_text = _truncate_text(supplied_context or "", DIRECT_CONTEXT_CHARS)
     if not selected_document_text:
         selected_document_text = "No selected document text was supplied for this request."
 
-    return f"""Selected document text:
+    if has_images:
+        return f"""Selected document text:
+{selected_document_text}
+
+CRITICAL RULES:
+1. Ground your answers using the selected document text and the provided images.
+2. You can and should use your general knowledge and vision to describe, analyze, and answer questions about the images.
+3. If the selected document text does not contain references to the image content, answer the image question using your own visual understanding. Do NOT mention the selected document text, do NOT state that the document is unrelated or lacks references, and do NOT reference the document at all in your response.
+4. If the user asks multiple questions in a single prompt, address all of them clearly and completely.
+
+User question:
+{question}""".strip()
+    else:
+        return f"""Selected document text:
 {selected_document_text}
 
 CRITICAL RULES:
@@ -1224,19 +1259,45 @@ CRITICAL RULES:
 User question:
 {question}""".strip()
 
+def parse_data_url(data_url: str) -> tuple[str, str]:
+    try:
+        if "," in data_url:
+            header, base64_data = data_url.split(",", 1)
+            if ";" in header and ":" in header:
+                mime_type = header.split(";")[0].split(":")[1]
+                return mime_type, base64_data
+    except Exception:
+        pass
+    return "image/jpeg", data_url
+
 async def _generate_with_gemini(
     *,
     api_key: str,
     model: str,
     prompt: str,
     temperature: float,
+    images: list[str] | None = None,
 ) -> str:
     url = GEMINI_API_URL.format(model=_model_path_name(model))
+    masked_key = f"{api_key[:8]}...{api_key[-6:]}" if api_key and len(api_key) > 14 else "None"
+    print(f"[Gemini Call] model={model} key={masked_key} url={url} has_images={bool(images)}")
+    
+    parts = [{"text": prompt}]
+    if images:
+        for img_url in images:
+            mime_type, base64_data = parse_data_url(img_url)
+            parts.append({
+                "inlineData": {
+                    "mimeType": mime_type,
+                    "data": base64_data
+                }
+            })
+
     payload = {
         "contents": [
             {
                 "role": "user",
-                "parts": [{"text": prompt}],
+                "parts": parts,
             }
         ],
         "generationConfig": {
@@ -1256,6 +1317,49 @@ async def _generate_with_gemini(
                 "model": model,
             },
         ) from error
+
+    # Fallback/Retry strategy:
+    # 1. If we got 503 or 429 and the model is gemini-2.5-flash, sleep and retry up to 3 times with progressive backoff.
+    if response.status_code in (503, 429) and model == "gemini-2.5-flash":
+        for attempt in range(3):
+            delay = 1.5 * (attempt + 1)
+            print(f"gemini-2.5-flash returned {response.status_code}. Attempt {attempt + 1} failed. Sleeping {delay}s and retrying...")
+            await asyncio.sleep(delay)
+            try:
+                async with httpx.AsyncClient(timeout=45, trust_env=False) as client:
+                    response = await client.post(f"{url}?key={api_key}", json=payload)
+                if response.status_code < 400:
+                    break
+            except Exception as err:
+                print(f"Retry attempt {attempt + 1} failed with exception: {err}")
+
+    # 2. If the request still failed (or it was a different model that failed) and model is not gemini-2.5-flash:
+    #    fallback to gemini-2.5-flash (since it's the only one with quota on this key).
+    if response.status_code >= 400 and model != "gemini-2.5-flash":
+        fallback_model = "gemini-2.5-flash"
+        print(f"Gemini model {model} failed with status {response.status_code}. Retrying with fallback model {fallback_model}...")
+        fallback_url = GEMINI_API_URL.format(model=_model_path_name(fallback_model))
+        try:
+            async with httpx.AsyncClient(timeout=45, trust_env=False) as client:
+                response = await client.post(f"{fallback_url}?key={api_key}", json=payload)
+        except Exception as err:
+            print(f"Gemini fallback failed: {err}")
+
+    # 3. If fallback also got 503/429, do a final quick retry loop for gemini-2.5-flash.
+    if response.status_code in (503, 429) and model != "gemini-2.5-flash":
+        fallback_model = "gemini-2.5-flash"
+        fallback_url = GEMINI_API_URL.format(model=_model_path_name(fallback_model))
+        for attempt in range(3):
+            delay = 1.5 * (attempt + 1)
+            print(f"Fallback model gemini-2.5-flash returned {response.status_code}. Attempt {attempt + 1} failed. Sleeping {delay}s and retrying fallback...")
+            await asyncio.sleep(delay)
+            try:
+                async with httpx.AsyncClient(timeout=45, trust_env=False) as client:
+                    response = await client.post(f"{fallback_url}?key={api_key}", json=payload)
+                if response.status_code < 400:
+                    break
+            except Exception:
+                pass
 
     if response.status_code >= 400:
         raise HTTPException(
@@ -1367,15 +1471,18 @@ async def _generate_response(
     model: str,
     prompt: str,
     temperature: float,
+    images: list[str] | None = None,
 ) -> str:
-    if _is_gemini_model(model):
+    if images or _is_gemini_model(model):
         if not gemini_api_key:
             raise HTTPException(status_code=503, detail="GEMINI_API_KEY is not configured")
+        actual_model = model if _is_gemini_model(model) else DEFAULT_GEMINI_MODEL
         return await _generate_with_gemini(
             api_key=gemini_api_key,
-            model=model,
+            model=actual_model,
             prompt=prompt,
             temperature=temperature,
+            images=images,
         )
 
     api_key = cerebras_api_key or os.getenv("CEREBRAS_API_KEY")
@@ -1399,6 +1506,7 @@ async def _generate_response(
             model=DEFAULT_GEMINI_MODEL,
             prompt=prompt,
             temperature=temperature,
+            images=images,
         )
 
 @app.get("/health")
@@ -1594,10 +1702,45 @@ async def delete_files(req: DeleteFilesRequest) -> dict[str, Any]:
         "warnings": warnings,
     }
 
+async def _tavily_search_query(query: str, max_results: int = 6) -> dict[str, Any]:
+    api_key = os.getenv("TAVILY_API_KEY")
+    if not api_key:
+        print("Tavily API key is not configured")
+        return {"results": [], "answer": None}
+    
+    url = "https://api.tavily.com/search"
+    headers = {
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "api_key": api_key,
+        "query": query,
+        "max_results": max_results,
+        "search_depth": "advanced",
+        "include_answer": True,
+        "include_raw_content": False
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            return {
+                "results": data.get("results", []),
+                "answer": data.get("answer")
+            }
+    except Exception as error:
+        print(f"Tavily search failed: {error}")
+        return {"results": [], "answer": None}
+
 @app.post("/query", response_model=QueryResponse)
 async def query(req: QueryRequest) -> QueryResponse:
     embedding_api_key = req.gemini_api_key or os.getenv("GEMINI_API_KEY")
     model = req.model or DEFAULT_CHAT_MODEL
+
+    if req.images:
+        model = "gemini-2.5-flash"
 
     effective_top_k = req.top_k
     file_chunks = _local_workspace_chunks(req.workspace_id, req.file_id, req.file_name)
@@ -1622,13 +1765,14 @@ async def query(req: QueryRequest) -> QueryResponse:
         if not (req.context or "").strip():
             warnings.append("Direct selected-document context was requested, but no document text was supplied.")
 
-        prompt = _build_direct_document_prompt(req.question, req.context)
+        prompt = _build_direct_document_prompt(req.question, req.context, has_images=bool(req.images))
         answer = await _generate_response(
             gemini_api_key=embedding_api_key,
             cerebras_api_key=req.cerebras_api_key,
             model=model,
             prompt=prompt,
             temperature=req.temperature,
+            images=req.images,
         )
 
         lower = answer.lower()
@@ -1672,13 +1816,14 @@ async def query(req: QueryRequest) -> QueryResponse:
             )
             return QueryResponse(answer=deterministic_answer, sources=sources, model=model, retrieval=diagnostics)
 
-        prompt = _build_prompt(req.question, req.context, sources, hits=hits, evidence_focus=evidence_focus)
+        prompt = _build_prompt(req.question, req.context, sources, hits=hits, evidence_focus=evidence_focus, has_images=bool(req.images))
         answer = await _generate_response(
             gemini_api_key=embedding_api_key,
             cerebras_api_key=req.cerebras_api_key,
             model=model,
             prompt=prompt,
             temperature=req.temperature,
+            images=req.images,
         )
 
         diagnostics = RetrievalDiagnostics(
@@ -1732,13 +1877,57 @@ async def query(req: QueryRequest) -> QueryResponse:
     hits = _fuse_results(dense_results, lexical_results, effective_top_k)
     sources = _sources_from_hits(hits, req.question)
 
-    prompt = _build_prompt(req.question, req.context, sources, hits=hits, evidence_focus=evidence_focus)
+    web_search_context = None
+    if req.web_search:
+        try:
+            search_response = await _tavily_search_query(req.question)
+            tavily_results = search_response.get("results", [])
+            tavily_answer = search_response.get("answer")
+            
+            search_contexts = []
+            if tavily_answer:
+                search_contexts.append(f"--- [Synthesized Search Summary] ---\n{tavily_answer}")
+                
+            for idx, result in enumerate(tavily_results):
+                title = result.get("title") or "Web Page"
+                url = result.get("url") or ""
+                snippet = result.get("content") or ""
+                score = result.get("score") or 0.5
+                
+                sources.append(
+                    SourceRef(
+                        chunk_id=f"tavily-{idx}",
+                        file_id="web-search",
+                        file_name=f"Search: {title} ({url})",
+                        score=score,
+                        excerpt=snippet,
+                        retrieval={"url": url, "source": "tavily"}
+                    )
+                )
+                search_contexts.append(
+                    f"--- [Search Source: {title} | Link: {url}] ---\n{snippet}"
+                )
+            if search_contexts:
+                web_search_context = "\n\n".join(search_contexts)
+        except Exception as err:
+            warnings.append(f"Tavily search logic failed: {err}")
+
+    prompt = _build_prompt(
+        req.question,
+        req.context,
+        sources,
+        hits=hits,
+        evidence_focus=evidence_focus,
+        web_search_context=web_search_context,
+        has_images=bool(req.images),
+    )
     answer = await _generate_response(
         gemini_api_key=embedding_api_key,
         cerebras_api_key=req.cerebras_api_key,
         model=model,
         prompt=prompt,
         temperature=req.temperature,
+        images=req.images,
     )
 
     diagnostics = RetrievalDiagnostics(

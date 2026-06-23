@@ -139,13 +139,13 @@ const Settings = () => {
                   </div>
 
                   <div>
-                    <label className="text-[10px] uppercase text-on-surface-variant font-bold block mb-2">Corporate Email</label>
+                    <label className="text-[10px] uppercase text-on-surface-variant font-bold block mb-2">Email Address</label>
                     <input
                       type="email"
                       value={profileEmail}
                       onChange={(e) => setProfileEmail(e.target.value)}
                       className="w-full bg-surface-container-lowest border border-transparent rounded-lg p-3 text-sm text-on-surface focus:outline-none focus:border-primary/30 transition-all duration-200"
-                      placeholder="e.g. akshay@shuroq.ai"
+                      placeholder="e.g. akshay@aireadyschool.com"
                     />
                   </div>
                 </div>
