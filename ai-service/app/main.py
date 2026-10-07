@@ -60,6 +60,9 @@ GEMINI_EMBEDDING_URL = "https://generativelanguage.googleapis.com/v1beta/{model}
 GEMINI_BATCH_EMBEDDING_URL = "https://generativelanguage.googleapis.com/v1beta/{model}:batchEmbedContents"
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
 CEREBRAS_CHAT_COMPLETIONS_URL = "https://api.frenix.sh/v1/chat/completions"
+PRIMARY_API_KEY = os.getenv("PRIMARY_API_KEY", "")
+PRIMARY_BASE_URL = os.getenv("PRIMARY_BASE_URL", "").rstrip("/")
+PRIMARY_MODEL = os.getenv("PRIMARY_MODEL", "")
 STRICT_PDF_REFUSAL = "I don't have that information in the selected document."
 STRICT_PDF_SYSTEM_PROMPT = (
     "You are an assistant inside a document-grounded app.\n"
@@ -1208,7 +1211,7 @@ def _build_prompt(
         rule_1 = "1. Use ONLY the data provided below (document evidence and web search results). Do NOT use outside knowledge or make assumptions."
 
     return f"""
-You are AI Ready School, your multimodal AI Study Partner and Math/Data Tutor powered by igebra.ai.
+You are Chat with your documents, your multimodal AI assistant for your documents and datasets.
 {instructions}
 
 CRITICAL RULES:
@@ -1385,6 +1388,55 @@ async def _generate_with_gemini(
 
     return text
 
+
+async def _generate_with_primary(
+    *,
+    api_key: str,
+    model: str,
+    prompt: str,
+    temperature: float,
+) -> str:
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": STRICT_PDF_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": temperature,
+        "max_tokens": CEREBRAS_MAX_TOKENS,
+    }
+    url = f"{PRIMARY_BASE_URL}/chat/completions"
+    try:
+        async with httpx.AsyncClient(timeout=60, trust_env=False) as client:
+            response = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload,
+            )
+    except HTTPError as error:
+        raise HTTPException(status_code=502, detail={"message": "Could not connect to primary AI API", "reason": str(error), "model": model}) from error
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail={"message": "Primary AI API request failed", "status": response.status_code, "body": response.text[:1000], "model": model})
+    data = response.json()
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except json.JSONDecodeError:
+            data = {"choices": [{"message": {"content": data}}]}
+    if not isinstance(data, dict):
+        data = {"choices": []}
+    choices = data.get("choices") or []
+    message = choices[0].get("message", {}) if choices else {}
+    text = message.get("content", "") or ""
+    text = _strip_reasoning_blocks(text)
+    if not text:
+        reasoning = message.get("reasoning", "") or ""
+        text = _strip_reasoning_blocks(str(reasoning)).strip()
+    if not text:
+        raise HTTPException(status_code=502, detail={"message": "Primary AI returned an empty response", "model": model})
+    return text
+
+
 def _is_gemini_model(model: str) -> bool:
     return model.lower().startswith("gemini")
 
@@ -1473,6 +1525,12 @@ async def _generate_response(
     temperature: float,
     images: list[str] | None = None,
 ) -> str:
+    if not images and PRIMARY_API_KEY and PRIMARY_BASE_URL and PRIMARY_MODEL:
+        try:
+            return await _generate_with_primary(api_key=PRIMARY_API_KEY, model=PRIMARY_MODEL, prompt=prompt, temperature=temperature)
+        except HTTPException as primary_error:
+            print(f"Primary AI failed ({primary_error.status_code}). Falling back to existing providers...")
+
     if images or _is_gemini_model(model):
         if not gemini_api_key:
             raise HTTPException(status_code=503, detail="GEMINI_API_KEY is not configured")
